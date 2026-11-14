@@ -1,0 +1,286 @@
+---
+title: "Desempeño de message brokers ante ráfagas: emulador de Google Cloud Pub/Sub frente a RabbitMQ (AMQP 0-9-1)"
+author: "Martinez Pazmiño Fredy David"
+abstract: |
+  La concentración temporal de eventos puede degradar la confirmación de
+  publicación aun cuando la tasa media permanezca constante. Se compararon
+  RabbitMQ 3.12.1 y el emulador oficial de Google Cloud Pub/Sub 0.8.38 en un
+  banco local, con 32 ensayos y 64 000 mensajes de 1 KiB. En cada bloque
+  se contrastó tráfico uniforme de 1 000 mensajes/s con ráfagas de 4 000
+  mensajes/s durante 250 ms, conservando el volumen por segundo. El
+  generador en lazo abierto permitió medir la espera del productor por
+  separado de la llamada al broker. Se analizó el percentil 99 de la
+  confirmación y se auditó la recepción por identificador en tres
+  plazos. Con la ráfaga, el p99 mediano pasó de 640 a 1 714 ms
+  en RabbitMQ y de 3 a 268 ms en el emulador. En RabbitMQ, el 18,94 %
+  de los mensajes de ráfaga seguía sin observarse al corte de 0,5 s.
+  A los cinco segundos se habían observado todos. La espera en el
+  productor explica la mayor parte del retraso de estas configuraciones.
+---
+
+```{=latex}
+\begin{IEEEkeywords}
+AMQP, evaluación de desempeño, latencia de publicación, mensajería asíncrona, Pub/Sub, RabbitMQ, tráfico en ráfagas.
+\end{IEEEkeywords}
+```
+
+# Introducción
+
+Los brokers desacoplan a productores y consumidores. Incluso con una tasa media estable, una ráfaga puede aportar más mensajes de los que el publicador logra confirmar en ese intervalo. La mediana puede ocultar la espera de los mensajes más tardíos. De ahí la importancia de los percentiles altos al estudiar congestión transitoria [@shalev2024].
+
+Este trabajo plantea dos preguntas. **P1:** ¿cuánto cambia el p99 de confirmación al concentrar el mismo volumen en intervalos de 250 ms? **P2:** ¿qué proporción de los identificadores programados sigue sin observarse al cerrar la ventana de entrega, y cuánto cambia la estimación al ampliar ese plazo? La hipótesis operativa es que la espera del publicador amplifica el p99 si la ráfaga supera temporalmente su capacidad efectiva. Para comprobarla se registran, por mensaje, la llegada prevista, el encolado, el inicio y fin de la llamada de publicación y la primera recepción.
+
+La comparación local enfrenta RabbitMQ mediante AMQP 0-9-1 y el emulador oficial de Google Cloud Pub/Sub mediante gRPC. El emulador permite controlar el trayecto de red y puede diferir del servicio administrado [@googleemulator].
+
+# Trabajos relacionados
+
+Dobbelaere y Esmaili definen un marco de comparación a partir de funciones comunes del paradigma publicación/suscripción y muestran la importancia de especificar el nivel de fiabilidad de los ensayos [@dobbelaere2017]. Maharjan et al. evalúan latencia y rendimiento de cuatro colas con un generador común y distintos tamaños de carga útil [@maharjan2023]. Dyjach y Plechawska-Wójcik distinguen retrasos de entrega, procesamiento de mensajes acumulados y estabilidad, dimensiones en las que el resultado depende del escenario [@dyjach2024].
+
+Kamiński et al. comparan Kafka y RabbitMQ en diferentes entornos de aplicación [@kaminski2025]. Ramadan et al. varían la intensidad, el tamaño del mensaje y la cantidad de consumidores [@ramadan2026]. Aquí se conserva el volumen y se cambia la concentración temporal, con observaciones independientes de confirmación y entrega.
+
+# Metodología
+
+## Banco y contrato de publicación
+
+Las pruebas se ejecutaron en Ubuntu 24.04 sobre WSL2, en un AMD Ryzen 7 7435HS de 8 núcleos y 16 hilos, con 15 GiB visibles en Linux. Python 3.12.3 generó y consumió tráfico mediante loopback IPv4. RabbitMQ 3.12.1 usó Pika 1.4.4, una cola clásica durable y mensajes persistentes, con \textit{publisher confirms} y enrutamiento obligatorio. Pub/Sub 0.8.38 se ejecutó sobre OpenJDK 21 con el cliente \texttt{google-cloud-pubsub} 2.44.0. Se usó una llamada gRPC síncrona \texttt{Publish} con un mensaje por solicitud y sin reintentos de publicación. Ambos perfiles usaron cuatro trabajadores, un consumidor y mensajes de 1 024 bytes. Cada trabajador abrió su propia conexión o canal gRPC y mantuvo como máximo una publicación en vuelo.
+
+La confirmación de RabbitMQ y la respuesta gRPC con un identificador asignado definen el éxito de la llamada. El consumidor registra un identificador del experimento y solicita el acuse después de observarlo. Los acuses del consumidor y del publicador cubren tramos distintos del recorrido [@rabbitconfirms]. La comparación equipara el punto de observación del productor. La persistencia de la cola de RabbitMQ y la semántica del emulador introducen diferencias que se conservan como parte de cada configuración.
+
+## Diseño de la carga
+
+Se ejecutaron ocho bloques. Cada bloque contiene los cuatro cruces broker × perfil, con orden aleatorio reproducible (semilla 260613). Cada ensayo utiliza recursos nuevos y 32 mensajes de calentamiento confirmados y recibidos antes del origen temporal. El ensayo programó 2 000 mensajes en dos segundos. En el perfil uniforme se programó un mensaje cada milisegundo. En el perfil de ráfaga, los 1 000 mensajes de cada segundo se programaron cada 250 microsegundos durante el primer cuarto de segundo, seguidos de 750 ms sin nuevas llegadas. El generador depositó las llegadas en una cola FIFO en memoria independiente de los trabajadores de publicación.
+
+La unidad de análisis es el ensayo. El generador usa el mismo reloj monotónico de alta resolución (\texttt{perf\_counter\_ns}) para todos los eventos del ensayo. La diferencia entre la llegada prevista y el encolado permite medir el retraso del generador, incluida la planificación del sistema operativo. La cola desacopla la intensidad ofrecida del ritmo de las confirmaciones y permite conservar los intentos que se acumulan bajo congestión.
+
+## Métricas y estimación
+
+Para un mensaje confirmado, $t_0$ es la llegada prevista, $t_q$ el encolado, $t_s$ el inicio de publicación y $t_c$ la confirmación. La latencia de publicación que experimenta la aplicación se descompone como sigue.
+
+$$
+L=t_c-t_0=(t_q-t_0)+(t_s-t_q)+(t_c-t_s).
+$$
+
+Se calcularon p50, p95 y p99 de $L$ por ensayo con interpolación lineal. También se calcularon las medianas de $t_s-t_0$ y de $t_c-t_s$. La primera incluye planificación y espera local, y la segunda comprende serialización, transporte, broker y retorno de la confirmación. Las publicaciones sin confirmación positiva se contabilizan como tales y quedan fuera del cálculo de percentiles.
+
+Sea $N$ el número de mensajes programados y $U_d$ el número de sus identificadores distintos observados hasta $d$ segundos después de los dos segundos de carga. La pérdida observada es
+
+$$
+\widehat{P}_{d}=100\,\frac{N-U_d}{N}.
+$$
+
+El plazo principal es $d=0{,}5$ s. Los cortes $d=0$ y $d=5$ s permiten evaluar sensibilidad. Se cuentan también los duplicados observados hasta el cierre de captura y se identifica el subconjunto de publicaciones confirmadas que aún falta en cada corte. La ausencia de recepción dentro de una ventana puede reflejar espera local, confirmación tardía o entrega tardía.
+
+El efecto de la ráfaga se estimó restando los p99 dentro de cada bloque y tomando la mediana de las ocho diferencias. Para describir la variabilidad se remuestrearon bloques completos 10 000 veces (semilla 91), con intervalos percentiles del 95 %. El diseño conserva la dependencia entre los ensayos de un mismo bloque y evita tratar cada mensaje como una réplica independiente.
+
+# Resultados
+
+```{python}
+#| label: preparar
+#| include: false
+from collections import Counter
+from pathlib import Path
+from random import Random
+from statistics import median, quantiles
+from IPython.display import Markdown, display
+from benchmark import read_results, summarize
+
+groups = read_results(Path("results.csv"))
+brokers = ("rabbitmq", "pubsub")
+labels = {"rabbitmq": "RabbitMQ", "pubsub": "Pub/Sub"}
+profiles = ("uniforme", "rafaga")
+cuts = (0, 0.5, 5)
+stats = {d: summarize(groups, grace=d) for d in cuts}
+reps = sorted({r["replica"] for r in stats[0.5]})
+lookup = {(r["broker"], r["perfil"], r["replica"]): r for r in stats[0.5]}
+
+def get(broker, profile, metric):
+    return [lookup[broker, profile, r][metric] for r in reps]
+
+def total(broker, profile, metric, cutoff=0.5):
+    return sum(r[metric] for r in stats[cutoff]
+               if (r["broker"], r["perfil"]) == (broker, profile))
+
+def fmt(value, places=2):
+    return f"{value:.{places}f}".replace(".", ",")
+
+def estimate(differences):
+    rng = Random(91)
+    draws = [median(rng.choices(differences, k=len(differences))) for _ in range(10000)]
+    limits = quantiles(draws, n=200, method="inclusive")
+    return median(differences), limits[4], limits[194]
+
+def effect(broker):
+    return [b - a for a, b in zip(get(broker, "uniforme", "p99"),
+                                  get(broker, "rafaga", "p99"))]
+
+def interval(values):
+    center, lo, hi = estimate(values)
+    return f"{fmt(center)} ms (IC 95 % de {fmt(lo)} a {fmt(hi)} ms)"
+```
+
+```{python}
+#| label: tabla-latencia
+#| results: asis
+rows = []
+for broker in brokers:
+    for profile in profiles:
+        name = "Unif." if profile == "uniforme" else "Ráf."
+        metrics = [fmt(median(get(broker, profile, metric))) for metric in ("p50", "p95", "p99")]
+        rows.append(" & ".join([labels[broker], name, *metrics]) + r" \\")
+table = "\n".join(rows)
+display(Markdown(rf"""
+\begin{{table}}[!t]
+\caption{{Latencia de publicación en ms (mediana entre réplicas)}}
+\label{{tbl-latencia}}
+\centering
+\begin{{tabular}}{{llrrr}}
+\hline
+Broker & Perfil & p50 & p95 & p99 \\
+\hline
+{table}
+\hline
+\end{{tabular}}
+\end{{table}}
+"""))
+```
+
+```{python}
+#| label: fig-resultados
+#| fig-cap: "p99 de publicación por réplica. Las líneas unen los ensayos del mismo bloque y los rombos indican las medianas."
+#| fig-width: 3.43
+#| fig-height: 1.84
+#| out-width: "100%"
+import matplotlib.pyplot as plt
+
+plt.rcParams.update({
+    "font.size": 8, "axes.labelsize": 8, "axes.titlesize": 9,
+    "axes.spines.top": False, "axes.spines.right": False,
+})
+fig, axes = plt.subplots(1, 2, sharey=True, layout="constrained")
+for ax, broker, color in zip(axes, brokers, ("#16536b", "#8d4025")):
+    a, b = (get(broker, p, "p99") for p in profiles)
+    for x, y in zip(a, b):
+        ax.plot([0, 1], [x, y], color=color, alpha=0.4, lw=0.8, marker="o", ms=2.4)
+    ax.scatter([0, 1], [median(a), median(b)], marker="D", s=18,
+               facecolors="white", edgecolors="#171717", zorder=5)
+    ax.set_title(labels[broker])
+    ax.set_xticks([0, 1], ["Uniforme", "Ráfaga"])
+    ax.set_xlim(-0.2, 1.2)
+    ax.grid(axis="y", alpha=0.22)
+    ax.set_yscale("log")
+axes[0].set_ylabel("p99 de publicación (ms)")
+plt.show()
+```
+
+## Latencia de confirmación
+
+```{python}
+#| label: texto-latencia
+#| results: asis
+paragraphs = []
+for broker in brokers:
+    a, b = [median(get(broker, profile, "p99")) for profile in profiles]
+    wait_a, wait_b = [median(get(broker, profile, "espera50")) for profile in profiles]
+    rpc_a, rpc_b = [median(get(broker, profile, "rpc50")) for profile in profiles]
+    paragraphs.append(
+        f"En {labels[broker]}, el p99 mediano pasó de {fmt(a)} a {fmt(b)} ms. "
+        f"El cambio pareado fue de {interval(effect(broker))}. "
+        f"Entre los perfiles uniforme y de ráfaga, la espera previa a la llamada pasó "
+        f"de {fmt(wait_a)} a {fmt(wait_b)} ms, mientras que la mediana de la llamada "
+        f"pasó de {fmt(rpc_a)} a {fmt(rpc_b)} ms."
+    )
+jitter = [(int(r["encolado_ns"]) - int(r["programado_ns"])) / 1e6
+          for rows in groups.values() for r in rows]
+inter = [r - p for r, p in zip(effect("rabbitmq"), effect("pubsub"))]
+paragraphs.append(
+    f"La diferencia entre los efectos (RabbitMQ menos Pub/Sub) fue de {interval(inter)}. "
+    f"El retraso de encolado del generador presentó un p99 global de "
+    f"{fmt(quantiles(jitter, n=100, method='inclusive')[98], 3)} ms. "
+    "La Fig. 1 muestra la dispersión entre bloques, con el eje vertical en escala logarítmica."
+)
+display(Markdown("\n\n".join(paragraphs)))
+```
+
+## Ausencias y sensibilidad al plazo
+
+```{python}
+#| label: tabla-ausencias
+#| results: asis
+rows = []
+for broker in brokers:
+    for profile in profiles:
+        name = "Unif." if profile == "uniforme" else "Ráf."
+        counts = [str(total(broker, profile, "ausentes", d)) for d in cuts]
+        rows.append(" & ".join([labels[broker], name, *counts]) + r" \\")
+table = "\n".join(rows)
+display(Markdown(rf"""
+\begin{{table}}[!t]
+\caption{{Identificadores no observados según el plazo de cierre}}
+\label{{tbl-ausencias}}
+\centering
+\begin{{tabular}}{{llrrr}}
+\hline
+Broker & Perfil & 0 s & 0,5 s & 5 s \\
+\hline
+{table}
+\hline
+\end{{tabular}}
+\end{{table}}
+"""))
+```
+
+```{python}
+#| label: texto-ausencias
+#| results: asis
+n = sum(r["n"] for r in stats[0.5])
+states = Counter(r["estado"] for rows in groups.values() for r in rows)
+missing = [sum(r["ausentes"] for r in stats[d]) for d in cuts]
+confirmed_missing = sum(r["confirmadas_ausentes"] for r in stats[0.5])
+dups = sum(r["duplicados"] for r in stats[5])
+denom = total("rabbitmq", "uniforme", "n")
+worst = max(total(b, p, "ausentes") / total(b, p, "n") for b in brokers for p in profiles)
+cut = int(next(iter(groups.values()))[0]["fin_carga_ns"]) + 500_000_000
+late = [r for rows in groups.values() for r in rows
+        if not r["recepcion_ns"] or int(r["recepcion_ns"]) > cut]
+not_started = sum(int(r["inicio_ns"]) > cut for r in late)
+in_flight = sum(int(r["inicio_ns"]) <= cut < int(r["fin_rpc_ns"]) for r in late)
+def integer(number):
+    return f"{number:,}".replace(",", "\u202f")
+
+display(Markdown(
+    f"Cada fila de la Tabla II representa {integer(denom)} llegadas programadas. "
+    f"En total, {integer(states['ok'])} de {integer(n)} publicaciones recibieron confirmación positiva "
+    f"y se registraron {dups} entregas duplicadas. Al cerrar a 0, 0,5 y 5 s "
+    f"se contabilizaron {integer(missing[0])}, {integer(missing[1])} y {integer(missing[2])} ausencias, "
+    f"respectivamente. La mayor tasa por condición en el plazo principal fue "
+    f"{fmt(worst*100, 3)} %. De los mensajes ausentes al corte de 0,5 s, "
+    f"{integer(not_started)} seguían esperando a un publicador, {integer(in_flight)} estaban "
+    f"en una llamada y {integer(len(late)-not_started-in_flight)} ya tenían respuesta. "
+    f"{integer(confirmed_missing)} recibieron finalmente confirmación positiva."
+))
+```
+
+# Discusión
+
+## Por qué conviene medir el tiempo desde la llegada
+
+La mediana de la llamada por sí sola describe la experiencia de un trabajador con un mensaje ya admitido. En RabbitMQ, la mediana del servicio por trabajador se mantuvo cerca de 5 ms mientras crecía la espera previa. Como comprobación de orden de magnitud, cuatro trabajadores que completan un mensaje cada 5 ms equivalen a unos 800 mensajes/s si el servicio fuera constante, por debajo de los 1 000 mensajes/s del perfil uniforme. Es una aproximación basada en una mediana, no una estimación de capacidad sostenida. Concuerda con el hecho de que ya había acumulación en el perfil uniforme y con que el 99 % de las ausencias a 0,5 s aún no había iniciado su llamada. En el emulador, el p99 aumentó de forma marcada durante la ráfaga, aun cuando el consumidor observó todos los mensajes de ese perfil al cierre de carga. El volumen total y la latencia de cola describen riesgos distintos para la aplicación.
+
+En RabbitMQ, los mensajes persistentes en una cola durable activan un recorrido de confirmación distinto del emulador. Pika usa un canal AMQP bloqueante por publicador, mientras que el otro cliente espera una respuesta gRPC por mensaje. La coexistencia de ambas diferencias impide atribuir el efecto a un protocolo de transporte concreto. La prueba identifica el comportamiento que observa la aplicación bajo ese contrato, en consonancia con la importancia de fijar la semántica de confirmación antes de interpretar un benchmark [@dobbelaere2017].
+
+## Amenazas a la validez
+
+**Interna.** El generador, el consumidor y el broker comparten la máquina. El orden aleatorio reduce la asociación entre tratamiento y deriva temporal. Persisten posibles interferencias del planificador, la JVM y el almacenamiento virtualizado. La descomposición localiza la espera en el cliente. Aislar la causa del tiempo de servicio requeriría medir CPU, disco y red.
+
+**De constructo.** La latencia primaria se condiciona a una confirmación positiva y la pérdida se define a partir de todos los identificadores previstos. Si aparecieran errores masivos, el p99 podría mejorar artificialmente al quedar menos observaciones confirmadas. La auditoría por identificador y el conteo separado de confirmaciones y duplicados permiten detectar ese caso. Un cierre a cinco segundos tampoco estima pérdida permanente. Una prueba de durabilidad necesitaría inyectar reinicios controlados y reconciliar posteriormente los identificadores aceptados y recuperados.
+
+**Externa y estadística.** Se ensayó un tamaño de mensaje, un nivel de concurrencia, un consumidor y dos segundos de carga por réplica. Los intervalos describen la variación entre ocho bloques de la misma máquina y son sensibles al tamaño de muestra. La red local, la configuración de persistencia y el uso de un emulador limitan la transferencia a un servicio regional gestionado. Para evaluar despliegues reales se requeriría controlar región, red, recursos, persistencia, agrupación de mensajes y política de reintentos, además de repetir la prueba a varias intensidades.
+
+# Conclusiones
+
+Con el mismo volumen, las ráfagas elevaron el p99 de confirmación en ambos casos, con un efecto pareado mayor en la configuración de RabbitMQ. El cambio principal ocurrió antes de la llamada. Todas las ausencias a 0,5 s se recuperaron dentro de la ventana de cinco segundos. Para interpretar una prueba de estrés con confirmaciones, conviene informar el p99 desde la llegada prevista y reconciliar los identificadores con el estado de publicación en el momento del corte.
+
+# Referencias {.unnumbered}
+
+::: {#refs}
+:::

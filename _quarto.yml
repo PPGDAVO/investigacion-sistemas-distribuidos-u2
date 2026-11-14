@@ -1,0 +1,33 @@
+project:
+  type: default
+  render:
+    - articulo.qmd
+lang: es
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/1ccf4696be22ea0b55f83cc9163bde3061fddb0a/ieee.csl
+format:
+  pdf:
+    documentclass: IEEEtran
+    classoption: [conference, letterpaper]
+    papersize: letter
+    pdf-engine: tectonic
+    mainfont: texgyretermes-regular.otf
+    cite-method: citeproc
+    colorlinks: false
+    number-sections: true
+    fig-pos: "!t"
+    keep-tex: false
+    include-in-header:
+      text: |
+        \setmainfont{texgyretermes-regular.otf}[BoldFont=texgyretermes-bold.otf,ItalicFont=texgyretermes-italic.otf,BoldItalicFont=texgyretermes-bolditalic.otf,FontFace={b}{n}{texgyretermes-bold.otf},FontFace={b}{it}{texgyretermes-bolditalic.otf}]
+        \usepackage{caption}
+        \usepackage{flushend}
+        \renewcommand{\IEEEkeywordsname}{Palabras clave}
+        \AtBeginDocument{\renewcommand{\thesubsection}{\Alph{subsection}}\setlength{\parskip}{2pt plus 0.5pt}\setlength{\parindent}{1em}}
+        \captionsetup[table]{name=Tabla,labelsep=period,font=footnotesize,justification=centering}
+        \renewcommand{\refname}{Referencias}
+        \captionsetup[figure]{name=Fig.,labelsep=period,font=footnotesize}
+execute:
+  echo: false
+  warning: false
+  error: false
