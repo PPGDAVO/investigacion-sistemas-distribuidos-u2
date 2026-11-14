@@ -1,7 +1,6 @@
 # Desempeño de brokers ante ráfagas de tráfico
 
 **Autor:** Martinez Pazmiño Fredy David  
-**Trabajo:** Investigación Formativa Individual, Unidad 2  
 **Documento:** [Artículo IEEE Conference](articulo.pdf) · [Fuente Quarto](articulo.qmd) · [Bitácora de IA](PROMPTS_OPENCODE.md)
 
 ## Resumen
@@ -77,8 +76,6 @@ La semilla reproduce el orden de las condiciones. Los tiempos dependen del equip
 | `fin_carga_ns, observacion_ns` | Fin del intervalo programado y cierre de captura |
 | `tasa_media, segundos, workers, payload_bytes, semilla` | Parámetros de ejecución |
 
-## Fuentes y alcance
+## Referencias
 
-El archivo BibTeX contiene seis publicaciones académicas y dos referencias técnicas primarias. Las publicaciones incluyen artículos de 2023 a 2026 en [Telecom](https://www.mdpi.com/journal/telecom/indexing), [Journal of Computer Sciences Institute](https://doaj.org/toc/2544-0764), [JUTI](https://doaj.org/toc/2406-8535) e [IEEE Micro](https://doi.org/10.1109/MM.2024.3420070), y un antecedente de [ACM DEBS](https://doi.org/10.1145/3093742.3093908). Las fichas de Google Cloud y RabbitMQ respaldan los detalles de implementación.
-
-Para entregar en Moodle, pega la URL del repositorio público en el cuadro de texto en línea.
+La [bibliografía del artículo](references.bib) reúne seis publicaciones académicas sobre evaluación de brokers y latencia, además de dos fuentes técnicas de Google Cloud y RabbitMQ que respaldan la configuración del emulador y el uso de confirmaciones de publicación.
